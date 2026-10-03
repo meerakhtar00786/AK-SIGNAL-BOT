@@ -1,5 +1,7 @@
+"""
 # AK SIGNAL BOT - premium dashboard (run:
 streamlit run ak_signal_bot.py)
+"""
 import time
 import requests
 import pandas as pd
