@@ -389,7 +389,7 @@ market_panel(mp_pair, mp_tf, sig_job["res"] if sig_job else None)
 
 with st.expander("Backtest"):
     b1, b2, b3 = st.columns(3)
-bt_pair = b1.selectbox("Asset", list(PAIRS), key="bt_pair")
+    bt_pair = b1.selectbox("Asset", list(PAIRS), key="bt_pair")
     bt_tf = b2.selectbox("Time frame", list(TF), key="bt_tf")
     bt_exp = b3.select_slider("Expiry (candles)", [1, 2, 3, 5], value=1, key="bt_exp")
     if st.button("Run backtest"):
