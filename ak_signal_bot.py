@@ -25,9 +25,8 @@ PAIRS = {
 }
 TF = {"1 min": ("1m", "5d", 60), "5 min": ("5m",
 "30d", 300), "15 min": ("15m", "30d", 900)}
-BROKERS = ["Quotex", "IQ Option", "Pocket
-Option", "Binomo"]
-TZ = "Asia/Karachi"
+  BROKERS = ["Quotex", "IQ Option", "Pocket",]
+TZ = "Asia/Karachi aera
 LOGO = ('<svg viewBox="0 0 64 64" width="{s}"
 height="{s}"
 xmlns="http://www.w3.org/2000/svg">'
