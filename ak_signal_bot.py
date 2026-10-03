@@ -82,6 +82,13 @@ button[data-baseweb="tab"]{font:700 15px 'Sora';color:var(--mute)}
 button[data-baseweb="tab"][aria-selected="true"]{color:var(--gold2)}
 div[data-baseweb="tab-highlight"]{background:var(--gold)}
 .note{color:var(--mute);font-size:12.5px;line-height:1.6}
+.badge{display:inline-block;padding:3px 11px;border-radius:99px;font-size:12.5px;font-weight:700}
+.b-live{background:rgba(39,211,162,.15);color:var(--up)}.b-off{background:rgba(255,92,114,.15);color:var(--down)}
+table.cn{width:100%;border-collapse:collapse;font-size:13.5px;text-align:right}
+table.cn th{color:var(--mute);font-weight:500;padding:8px 6px;text-align:right;border-bottom:1px solid var(--line)}
+table.cn th:first-child,table.cn td:first-child{text-align:left}
+table.cn td{padding:8px 6px;border-bottom:1px solid #1a2240;font-variant-numeric:tabular-nums}
+table.cn tr:last-child td{border-bottom:none}
 @media (max-width:640px){.orb{width:262px;height:262px}.orb .w{font-size:48px}.brand .name{font-size:21px}.live{display:none}}
 </style>"""
 st.markdown(CSS, unsafe_allow_html=True)
@@ -199,20 +206,88 @@ def votes_html(res):
     return f"<div class='card'><table class='votes'>{rows}</table></div>"
 
 
-def chart(res, pair, tf):
-    d = res["df"].tail(90)
+def chart(d, pair, tf, levels=()):
+    d = d.tail(70)
     f = go.Figure()
     f.add_trace(go.Candlestick(x=d.index, open=d.Open, high=d.High, low=d.Low, close=d.Close,
                                increasing_line_color="#27d3a2", decreasing_line_color="#ff5c72", name="Price"))
     for col, color in (("ema9", "#f3dd9c"), ("ema21", "#6aa9ff"), ("ema50", "#b78cff")):
         f.add_trace(go.Scatter(x=d.index, y=d[col], line=dict(width=1.3, color=color), name=col.upper()))
-    for lv, _ in res["levels"]:
-        f.add_hline(y=lv, line=dict(color="#27d3a2" if lv <= res["price"] else "#ff5c72", width=1, dash="dash"), opacity=.5)
+    last = float(d["Close"].iloc[-1])
+    for lv in levels:
+        f.add_hline(y=lv, line=dict(color="#27d3a2" if lv <= last else "#ff5c72", width=1, dash="dash"), opacity=.5)
     f.update_layout(height=420, margin=dict(l=8, r=8, t=34, b=8), xaxis_rangeslider_visible=False,
                     paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="#0e1426", font=dict(color="#c9d1ea"),
                     title=f"{pair}  {tf}", legend=dict(orientation="h", y=1.1),
                     xaxis=dict(gridcolor="#1b2440"), yaxis=dict(gridcolor="#1b2440"))
     return f
+
+
+def data_age(df):
+    if df.empty or df.index.tz is None:
+        return 0.0
+    return (pd.Timestamp.now(tz=TZ) - df.index[-1]).total_seconds()
+
+
+def is_live(df, sec):
+    return (not df.empty) and data_age(df) <= max(4 * sec, 600)
+
+
+def closed_msg(pair, df):
+    last = f"{df.index[-1]:%d %b %H:%M} PKT" if not df.empty else "none"
+    return (f"{pair} market looks closed or delayed (last candle: {last}). Forex is closed on weekends. "
+            "Try BTC/USD or ETH/USD, they trade 24/7.")
+
+
+def candles_html(df, n=12):
+    d = df.tail(n).iloc[::-1]
+    dec = 5 if float(d["Close"].iloc[0]) < 50 else 2
+    rows = ""
+    for t, r in d.iterrows():
+        mv = '<span class="good">▲ Up</span>' if r.Close >= r.Open else '<span class="bad">▼ Down</span>'
+        rows += (f"<tr><td>{t:%d %b %H:%M}</td><td>{r.Open:.{dec}f}</td><td>{r.High:.{dec}f}</td>"
+                 f"<td>{r.Low:.{dec}f}</td><td>{r.Close:.{dec}f}</td><td>{mv}</td></tr>")
+    return ("<div class='card'><table class='cn'><tr><th>Candle (PKT)</th><th>Open</th><th>High</th>"
+            f"<th>Low</th><th>Close</th><th>Move</th></tr>{rows}</table></div>")
+
+
+def why_html(job):
+    res = job["res"]
+    if res["signal"] != "WAIT":
+        return ""
+    last = res["votes"][-1]
+    if last["name"] == "Quality filter" and last["note"].startswith("Blocked"):
+        why = last["note"].replace("Blocked: ", "")
+    else:
+        why = f"indicators do not agree enough (score {res['score']:+d})"
+    lean = "BUY" if res["score"] > 0 else "SELL" if res["score"] < 0 else None
+    tip = f" Weak lean: {lean}, but skip it." if lean else ""
+    return (f"<div class='card meta'><b>Why WAIT:</b> {why}.{tip} "
+            "Lower the strictness in Settings to get more (weaker) signals.</div>")
+
+
+def market_panel(pair_name, tfname, res=None):
+    df = load(PAIRS[pair_name], tfname)
+    sec = TF[tfname][2]
+    if df.empty or len(df) < 3:
+        st.warning("No market data right now.")
+        return
+    last, prev = df.iloc[-1], df.iloc[-2]
+    chg = (last.Close - prev.Close) / prev.Close * 100
+    live = is_live(df, sec)
+    badge = ('<span class="badge b-live">Live</span>' if live
+             else '<span class="badge b-off">Market closed or delayed</span>')
+    dec = 5 if last.Close < 50 else 2
+    st.markdown(f"<p class='meta'><b>{pair_name}</b> on {tfname} {badge}<br>Last closed price "
+                f"<b>{last.Close:.{dec}f}</b> ({chg:+.3f}%). Last candle <b>{df.index[-1]:%d %b %H:%M}</b> PKT. "
+                "Compare these candles with your Quotex chart.</p>", unsafe_allow_html=True)
+    d = eng.add_indicators(df.tail(300))
+    levels = [lv for lv, _ in res["levels"]] if res else []
+    st.plotly_chart(chart(d, pair_name, tfname, levels), use_container_width=True)
+    st.markdown(candles_html(df), unsafe_allow_html=True)
+    st.markdown("<p class='note'>Candles come from the real market feed, so they can differ slightly from "
+                "your broker. Quotex OTC pairs use Quotex's own prices and will not match.</p>",
+                unsafe_allow_html=True)
 
 
 # -------------------------------------------------------------------- header
@@ -224,7 +299,7 @@ st.markdown(f"""<div class="top"><div class="brand">{LOGO.format(s=52)}
 
 with st.expander("Settings", expanded=False):
     s1, s2, s3 = st.columns(3)
-    thr = s1.slider("Signal strictness", 3, 9, 6, help="Higher means fewer but stronger signals")
+    thr = s1.slider("Signal strictness", 3, 9, 5, help="Higher means fewer but stronger signals")
     payout = s2.slider("Broker payout %", 70, 95, 85) / 100
     tg_on = s3.toggle("Send signal to Telegram")
     tg_token = st.text_input("Telegram bot token", type="password") if tg_on else ""
@@ -238,12 +313,17 @@ go_btn = st.button("Generate signal")
 
 if go_btn:
     sec = TF[tfname][2]
-    boundary = (int(time.time() // sec) + 1) * sec  # next candle open
-    st.session_state["job"] = dict(
-        phase="wait", pair=pair, tf=tfname, broker=broker, thr=thr, payout=payout,
-        tg=(tg_token, tg_chat) if tg_on and tg_token and tg_chat else None,
-        boundary=boundary, reveal_at=boundary + 2, end_at=boundary + sec)
-    st.session_state.pop("err", None)
+    dfc = load(PAIRS[pair], tfname)
+    if not is_live(dfc, sec):
+        st.session_state.pop("job", None)
+        st.session_state["err"] = closed_msg(pair, dfc)
+    else:
+        boundary = (int(time.time() // sec) + 1) * sec  # next candle open
+        st.session_state["job"] = dict(
+            phase="wait", pair=pair, tf=tfname, broker=broker, thr=thr, payout=payout,
+            tg=(tg_token, tg_chat) if tg_on and tg_token and tg_chat else None,
+            boundary=boundary, reveal_at=boundary + 2, end_at=boundary + sec)
+        st.session_state.pop("err", None)
 
 job0 = st.session_state.get("job")
 active = bool(job0) and job0["phase"] in ("wait", "signal")
@@ -266,9 +346,9 @@ def orb_panel():
         with st.spinner("Reading the closed candle..."):
             load_raw.clear()
             df = load(PAIRS[job["pair"]], job["tf"])
-            if df.empty or len(df) < 80:
+            if len(df) < 80 or not is_live(df, TF[job["tf"]][2]):
                 st.session_state.pop("job")
-                st.session_state["err"] = "No data received. Forex is closed on weekends. Try BTC/USD or ETH/USD."
+                st.session_state["err"] = closed_msg(job["pair"], df)
                 st.rerun()
             res = eng.analyze(df, threshold=job["thr"])
             bt = eng.backtest(df, expiry=1, threshold=job["thr"], payout=job["payout"], max_bars=900)
@@ -293,63 +373,20 @@ if st.session_state.get("err"):
     st.error(st.session_state["err"])
 
 job = st.session_state.get("job")
-if job and job["phase"] == "signal":
-    st.markdown(stats_html(job), unsafe_allow_html=True)
+sig_job = job if job and job["phase"] == "signal" else None
+if sig_job:
+    st.markdown(stats_html(sig_job), unsafe_allow_html=True)
+    st.markdown(why_html(sig_job), unsafe_allow_html=True)
     with st.expander("Indicator votes"):
-        st.markdown(votes_html(job["res"]), unsafe_allow_html=True)
-    with st.expander("Chart"):
-        st.plotly_chart(chart(job["res"], job["pair"], job["tf"]), use_container_width=True)
+        st.markdown(votes_html(sig_job["res"]), unsafe_allow_html=True)
 else:
     st.markdown("<p class='note'>The signal appears when the current candle closes, stays until its "
-                "expiry, then disappears by itself. Real market pairs only: Quotex OTC prices cannot "
-                "be analysed outside Quotex.</p>", unsafe_allow_html=True)
+                "expiry, then disappears by itself.</p>", unsafe_allow_html=True)
 
-st.markdown("---")
-tab2, tab3 = st.tabs(["Market scanner", "Backtest"])
+st.markdown("<h3 style='font-family:Sora;margin-top:18px'>Live market data</h3>", unsafe_allow_html=True)
+mp_pair, mp_tf = (job["pair"], job["tf"]) if job else (pair, tfname)
+market_panel(mp_pair, mp_tf, sig_job["res"] if sig_job else None)
 
-with tab2:
-    scan_tf = st.selectbox("Scanner time frame", list(TF), key="scan_tf")
-    if st.button("Scan all assets"):
-        rows, bar = [], st.progress(0.0)
-        for i, (name, sym) in enumerate(PAIRS.items()):
-            df = load(sym, scan_tf)
-            if not df.empty and len(df) >= 80:
-                r = eng.analyze(df, threshold=thr)
-                rows.append({"Asset": name, "Signal": DISP[r["signal"]], "Strength %": r["strength"],
-                             "Price": round(r["price"], 5)})
-            bar.progress((i + 1) / len(PAIRS))
-        bar.empty()
-        if rows:
-            st.dataframe(pd.DataFrame(rows).sort_values("Strength %", ascending=False),
-                         hide_index=True, use_container_width=True)
-        else:
-            st.warning("No data. Forex is closed on weekends; try again on a weekday.")
-
-with tab3:
+with st.expander("Backtest"):
     b1, b2, b3 = st.columns(3)
-    bt_pair = b1.selectbox("Asset", list(PAIRS), key="bt_pair")
-    bt_tf = b2.selectbox("Time frame", list(TF), key="bt_tf")
-    bt_exp = b3.select_slider("Expiry (candles)", [1, 2, 3, 5], value=1, key="bt_exp")
-    if st.button("Run backtest"):
-        with st.spinner("Testing on past candles..."):
-            df = load(PAIRS[bt_pair], bt_tf)
-            if df.empty or len(df) < 120:
-                st.error("Not enough data for a backtest.")
-            else:
-                bt = eng.backtest(df, expiry=bt_exp, threshold=thr, payout=payout)
-                m1, m2, m3 = st.columns(3)
-                m1.metric("Trades", bt["trades"])
-                m2.metric("Win rate", f"{bt['win_rate']:.1f}%")
-                m3.metric("Break-even needed", f"{bt['break_even']:.1f}%")
-                if bt["trades"] < 30:
-                    st.warning("Too few trades to trust. Lower the strictness or try another asset.")
-                elif bt["win_rate"] > bt["break_even"] + 3:
-                    st.success(f"Above break-even on this sample (net {bt['net_units']:+.1f} stakes). "
-                               "Past results do not guarantee the future. Test on demo.")
-                else:
-                    st.error(f"Not profitable on this sample (net {bt['net_units']:+.1f} stakes). "
-                             "Do not trade this setting with real money.")
-
-st.markdown("<p class='note'>Signals are indicator calculations, not predictions or financial advice. "
-            "Binary options carry a high risk of losing your stake. Use a demo account first.</p>",
-            unsafe_allow_html=True)
+    bt_pair = b1.selectbox("Asset", l
