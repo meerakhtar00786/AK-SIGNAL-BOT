@@ -1,8 +1,8 @@
 """
-AK SIGNAL BOT - engine
-Indicators: EMA 9/21/50, RSI, MACD, Stochastic, Bollinger Bands, ATR,
-Support/Resistance (pivot clusters), candle patterns.
-Only needs pandas + numpy.
+AK SIGNAL BOT - PRO engine
+EMA 9/21/50/100/200, RSI, MACD, Stochastic, Bollinger, ATR, ADX/DI,
+Support/Resistance, candle patterns + quality gates (regime, volatility,
+agreement, opposing S/R). Needs only pandas + numpy.
 """
 import numpy as np
 import pandas as pd
@@ -29,6 +29,19 @@ def atr(df, n=14):
     return tr.ewm(alpha=1 / n, adjust=False).mean()
 
 
+def adx_calc(df, n=14):
+    up = df["High"].diff()
+    dn = -df["Low"].diff()
+    plus_dm = pd.Series(np.where((up > dn) & (up > 0), up, 0.0), index=df.index)
+    minus_dm = pd.Series(np.where((dn > up) & (dn > 0), dn, 0.0), index=df.index)
+    a = atr(df, n).replace(0, np.nan)
+    pdi = 100 * plus_dm.ewm(alpha=1 / n, adjust=False).mean() / a
+    mdi = 100 * minus_dm.ewm(alpha=1 / n, adjust=False).mean() / a
+    dx = 100 * (pdi - mdi).abs() / (pdi + mdi).replace(0, np.nan)
+    adx = dx.ewm(alpha=1 / n, adjust=False).mean()
+    return pdi.fillna(0), mdi.fillna(0), adx.fillna(0)
+
+
 def add_indicators(df, p=None):
     p = p or {}
     d = df.copy()
@@ -36,6 +49,8 @@ def add_indicators(df, p=None):
     d["ema9"] = ema(c, p.get("ema_fast", 9))
     d["ema21"] = ema(c, p.get("ema_mid", 21))
     d["ema50"] = ema(c, p.get("ema_slow", 50))
+    d["ema100"] = ema(c, 100)
+    d["ema200"] = ema(c, 200)
     d["rsi"] = rsi(c, p.get("rsi_len", 14))
     m = ema(c, 12) - ema(c, 26)
     d["macd"], d["macd_sig"] = m, ema(m, 9)
@@ -47,6 +62,8 @@ def add_indicators(df, p=None):
     sd = c.rolling(20).std()
     d["bb_mid"], d["bb_up"], d["bb_low"] = mid, mid + 2 * sd, mid - 2 * sd
     d["atr"] = atr(d)
+    d["atr_ma"] = d["atr"].rolling(50).mean()
+    d["pdi"], d["mdi"], d["adx"] = adx_calc(d)
     w = p.get("pivot_w", 3)
     d["piv_h"] = d["High"] == d["High"].rolling(2 * w + 1, center=True).max()
     d["piv_l"] = d["Low"] == d["Low"].rolling(2 * w + 1, center=True).min()
@@ -55,7 +72,7 @@ def add_indicators(df, p=None):
 
 # ---------------------------------------------------------- support/resistance
 def sr_levels(d, t, lookback=150, w=3):
-    """Levels known at bar t (only pivots already confirmed, no look-ahead)."""
+    """Levels known at bar t (only confirmed pivots, no look-ahead)."""
     lo_i = max(0, t - lookback)
     hi_i = t - w
     if hi_i <= lo_i:
@@ -77,8 +94,8 @@ def sr_levels(d, t, lookback=150, w=3):
     return [(float(np.mean(g)), len(g)) for g in groups]  # (price, touches)
 
 
-# -------------------------------------------------------------------- signals
-MAX_SCORE = 12
+# -------------------------------------------------------------------- scoring
+MAX_SCORE = 16  # 2+2+1+1+1+3+2 (original) + 2 (ADX) + 2 (higher trend)
 
 
 def score_at(d, t, p=None):
@@ -101,6 +118,27 @@ def score_at(d, t, p=None):
         vote("EMA trend", -1, "Fast EMA below mid EMA")
     else:
         vote("EMA trend", 0, "Flat")
+
+    # Higher trend proxy (2): EMA 100 / 200
+    if t < 200:
+        vote("Higher trend", 0, "Not enough history yet")
+    elif price > r.ema100 > r.ema200:
+        vote("Higher trend", 2, "Price > EMA100 > EMA200")
+    elif price < r.ema100 < r.ema200:
+        vote("Higher trend", -2, "Price < EMA100 < EMA200")
+    elif price > r.ema200:
+        vote("Higher trend", 1, "Price above EMA200")
+    else:
+        vote("Higher trend", -1, "Price below EMA200")
+
+    # ADX / DI (2)
+    if r.adx >= 25:
+        vote("ADX", 2 if r.pdi > r.mdi else -2,
+             f"ADX {r.adx:.0f}, strong {'up' if r.pdi > r.mdi else 'down'}trend")
+    elif r.adx >= 18:
+        vote("ADX", 1 if r.pdi > r.mdi else -1, f"ADX {r.adx:.0f}, building trend")
+    else:
+        vote("ADX", 0, f"ADX {r.adx:.0f}, ranging market")
 
     # RSI (2)
     lo_, hi_ = p.get("rsi_low", 30), p.get("rsi_high", 70)
@@ -150,7 +188,7 @@ def score_at(d, t, p=None):
     if ns and price - ns[0] <= near:
         sr_v, sr_n = (3 if ns[1] >= 2 else 2), f"At support {ns[0]:.5g} ({ns[1]} touches)"
     if nr and nr[0] - price <= near:
-        if abs(sr_v) == 0 or (nr[0] - price) < (price - ns[0] if ns else 1e9):
+        if sr_v == 0 or (nr[0] - price) < (price - ns[0] if ns else 1e9):
             sr_v, sr_n = (-3 if nr[1] >= 2 else -2), f"At resistance {nr[0]:.5g} ({nr[1]} touches)"
     vote("Support/Resistance", sr_v, sr_n)
 
@@ -173,26 +211,62 @@ def score_at(d, t, p=None):
         vote("Candle", 0, "No pattern")
 
     total = sum(v["vote"] for v in votes)
-    return {
-        "score": total, "votes": votes, "price": price, "atr": a,
-        "support": ns, "resistance": nr, "levels": levels,
-    }
+    return {"score": total, "votes": votes, "price": price, "atr": a,
+            "support": ns, "resistance": nr, "levels": levels}
 
 
 def decide(score, threshold=5):
-    if score >= threshold:
+    thr = threshold * MAX_SCORE / 12.0  # slider meaning stays the same
+    if score >= thr:
         return "CALL"
-    if score <= -threshold:
+    if score <= -thr:
         return "PUT"
     return "WAIT"
+
+
+# -------------------------------------------------------------- quality gates
+REVERSAL = {"RSI", "Stochastic", "Bollinger", "Support/Resistance"}
+
+
+def signal_at(d, t, p=None, threshold=5):
+    res = score_at(d, t, p)
+    sig = decide(res["score"], threshold)
+    votes = res["votes"]
+    if sig != "WAIT":
+        dirn = 1 if sig == "CALL" else -1
+        r = d.iloc[t]
+        agree = sum(1 for v in votes if v["vote"] * dirn > 0)
+        oppose = sum(1 for v in votes if v["vote"] * dirn < 0)
+        sr_v = next(v["vote"] for v in votes if v["name"] == "Support/Resistance")
+        vr = float(r.atr / r.atr_ma) if r.atr_ma and r.atr_ma == r.atr_ma else 1.0
+        reason = None
+        if vr < 0.6 or vr > 2.5:
+            reason = f"volatility out of range (x{vr:.1f} of normal)"
+        elif agree < 4:
+            reason = f"only {agree} indicators agree"
+        elif oppose > 2:
+            reason = f"{oppose} indicators point the other way"
+        elif sr_v * dirn <= -2:
+            reason = "price is at an opposing support/resistance level"
+        elif r.adx >= 25 and dirn != (1 if r.pdi > r.mdi else -1):
+            reason = "against a strong trend"
+        elif r.adx < 18 and not any(v["name"] in REVERSAL and v["vote"] * dirn > 0 for v in votes):
+            reason = "ranging market with no reversal trigger"
+        if reason:
+            sig = "WAIT"
+            votes.append({"name": "Quality filter", "vote": 0, "note": "Blocked: " + reason})
+        else:
+            votes.append({"name": "Quality filter", "vote": 0,
+                          "note": f"Passed ({agree} agree, {oppose} oppose)"})
+    res["signal"] = sig
+    return res
 
 
 def analyze(df, p=None, threshold=5):
     """Signal for the last fully closed candle."""
     d = add_indicators(df, p)
     t = len(d) - 1
-    res = score_at(d, t, p)
-    res["signal"] = decide(res["score"], threshold)
+    res = signal_at(d, t, p, threshold)
     res["strength"] = int(min(100, abs(res["score"]) / MAX_SCORE * 100))
     res["time"] = d.index[t]
     res["df"] = d
@@ -200,12 +274,12 @@ def analyze(df, p=None, threshold=5):
 
 
 # ------------------------------------------------------------------- backtest
-def backtest(df, expiry=1, threshold=5, payout=0.85, p=None, max_bars=1500):
+def backtest(df, expiry=1, threshold=5, payout=0.85, p=None, max_bars=2500):
     d = add_indicators(df, p).tail(max_bars).reset_index(drop=False)
+    start = min(210, max(60, len(d) // 3))
     wins = losses = 0
-    for t in range(60, len(d) - expiry):
-        s = score_at(d, t, p)["score"]
-        sig = decide(s, threshold)
+    for t in range(start, len(d) - expiry):
+        sig = signal_at(d, t, p, threshold)["signal"]
         if sig == "WAIT":
             continue
         entry, exit_ = d["Close"].iloc[t], d["Close"].iloc[t + expiry]
@@ -215,6 +289,5 @@ def backtest(df, expiry=1, threshold=5, payout=0.85, p=None, max_bars=1500):
     n = wins + losses
     wr = wins / n * 100 if n else 0.0
     be = 100 / (1 + payout)
-    profit_units = wins * payout - losses  # in units of stake
     return {"trades": n, "wins": wins, "losses": losses, "win_rate": wr,
-            "break_even": be, "net_units": profit_units}
+            "break_even": be, "net_units": wins * payout - losses}
