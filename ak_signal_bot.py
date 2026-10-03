@@ -390,3 +390,29 @@ market_panel(mp_pair, mp_tf, sig_job["res"] if sig_job else None)
 with st.expander("Backtest"):
     b1, b2, b3 = st.columns(3)
     bt_pair = b1.selectbox("Asset", l
+bt_pair = b1.selectbox("Asset", list(PAIRS), key="bt_pair")
+    bt_tf = b2.selectbox("Time frame", list(TF), key="bt_tf")
+    bt_exp = b3.select_slider("Expiry (candles)", [1, 2, 3, 5], value=1, key="bt_exp")
+    if st.button("Run backtest"):
+        with st.spinner("Testing on past candles..."):
+            df = load(PAIRS[bt_pair], bt_tf)
+            if df.empty or len(df) < 120:
+                st.error("Not enough data for a backtest.")
+            else:
+                bt = eng.backtest(df, expiry=bt_exp, threshold=thr, payout=payout)
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Trades", bt["trades"])
+                m2.metric("Win rate", f"{bt['win_rate']:.1f}%")
+                m3.metric("Break-even needed", f"{bt['break_even']:.1f}%")
+                if bt["trades"] < 30:
+                    st.warning("Too few trades to trust. Lower the strictness or try another asset.")
+                elif bt["win_rate"] > bt["break_even"] + 3:
+                    st.success(f"Above break-even on this sample (net {bt['net_units']:+.1f} stakes). "
+                               "Past results do not guarantee the future. Test on demo.")
+                else:
+                    st.error(f"Not profitable on this sample (net {bt['net_units']:+.1f} stakes). "
+                             "Do not trade this setting with real money.")
+
+st.markdown("<p class='note'>Signals are indicator calculations, not predictions or financial advice. "
+            "Binary options carry a high risk of losing your stake. Use a demo account first.</p>",
+            unsafe_allow_html=True)
