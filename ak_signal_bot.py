@@ -158,6 +158,20 @@ def market_panel(pair_name, tfname, res=None):
                 unsafe_allow_html=True)
 
 
+def quick_card(pair_name, tfname, broker_name):
+    df = load(PAIRS[pair_name], tfname)
+    if df.empty:
+        return "<div class='card meta'>No market data right now.</div>"
+    last = df.iloc[-1]
+    live = is_live(df, TF[tfname][2])
+    badge = ('<span class="badge b-live">Live</span>' if live
+             else '<span class="badge b-off">Market closed or delayed</span>')
+    dec = 5 if last.Close < 50 else 2
+    return (f"<div class='card meta'><b>{pair_name}</b> on {tfname} via {broker_name} {badge}<br>"
+            f"Last closed price <b>{last.Close:.{dec}f}</b><br>Last candle <b>{df.index[-1]:%H:%M}</b> PKT<br>"
+            f"Expiry <b>{tfname}</b>, same as the time frame</div>")
+
+
 # -------------------------------------------------------------------- header
 now_ts = pd.Timestamp.now(tz=TZ)
 st.markdown(f"""<div class="top"><div class="brand">{th.LOGO.format(s=54)}
@@ -173,11 +187,16 @@ with st.expander("Settings", expanded=False):
     tg_token = st.text_input("Telegram bot token", type="password") if tg_on else ""
     tg_chat = st.text_input("Telegram chat ID") if tg_on else ""
 
-c1, c2, c3 = st.columns(3)
-broker = c1.selectbox("Broker", BROKERS)
-pair = c2.selectbox("Trading asset", list(PAIRS))
-tfname = c3.selectbox("Time frame", list(TF))
-go_btn = st.button("GENERATE SIGNAL")
+orb_box = st.container()  # the circle is drawn here, above the controls
+
+left, right = st.columns([1.1, 1], gap="medium")
+with left:
+    go_btn = st.button("GENERATE SIGNAL")
+    broker = st.selectbox("Broker", BROKERS)
+    pair = st.selectbox("Trading asset", list(PAIRS))
+    tfname = st.selectbox("Time frame", list(TF))
+with right:
+    st.markdown(quick_card(pair, tfname, broker), unsafe_allow_html=True)
 
 if go_btn:
     sec = TF[tfname][2]
@@ -224,15 +243,16 @@ def orb_panel():
             send_telegram(job["tg"][0], job["tg"][1], tg_text(job))
         st.rerun()
     if job["phase"] == "signal":
-        left = job["end_at"] - now
-        if left > 0:
-            st.markdown(th.orb_signal(job, left), unsafe_allow_html=True)
+        left_s = job["end_at"] - now
+        if left_s > 0:
+            st.markdown(th.orb_signal(job, left_s), unsafe_allow_html=True)
             return
         st.session_state.pop("job")
         st.rerun()
 
 
-orb_panel()
+with orb_box:
+    orb_panel()
 
 if st.session_state.get("err"):
     st.error(st.session_state["err"])
